@@ -1,0 +1,97 @@
+name: Test Grade
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  grade:
+    runs-on: ubuntu-latest
+    outputs:
+      grade: ${{ steps.grade.outputs.grade }}
+      passed: ${{ steps.grade.outputs.passed }}
+      total: ${{ steps.grade.outputs.total }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt
+          else
+            pip install pytest
+          fi
+          if [ -f pyproject.toml ]; then pip install -e .; fi
+
+      - name: Run tests and create JUnit report
+        continue-on-error: true
+        run: |
+          pytest -q test_defs_utils.py --junitxml=pytest-report.xml
+
+      - name: Calculate grade
+        id: grade
+        run: |
+          python <<'PY'
+          import math
+          import os
+          import xml.etree.ElementTree as ET
+
+          report_path = "pytest-report.xml"
+          passed = 0
+          total = 0
+
+          if os.path.exists(report_path):
+              root = ET.parse(report_path).getroot()
+              testsuite = root if root.tag == "testsuite" else root.find("testsuite")
+              if testsuite is not None:
+                  total = int(testsuite.attrib.get("tests", 0))
+                  failures = int(testsuite.attrib.get("failures", 0))
+                  errors = int(testsuite.attrib.get("errors", 0))
+                  skipped = int(testsuite.attrib.get("skipped", 0))
+                  passed = max(total - failures - errors - skipped, 0)
+
+          if total == 0:
+              grade = 1
+          elif passed == 0:
+              grade = 1
+          elif passed == total:
+              grade = 5
+          else:
+              grade = min(4, max(2, math.ceil((passed / total) * 4)))
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"grade={grade}\n")
+              fh.write(f"passed={passed}\n")
+              fh.write(f"total={total}\n")
+
+          summary = [
+              "## Test Grade",
+              "",
+              f"- Grade: {grade}/5",
+              f"- Passed: {passed}",
+              f"- Total: {total}",
+          ]
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
+              fh.write("\n".join(summary) + "\n")
+          PY
+
+      - name: Show grade
+        run: |
+          echo "Test grade: ${{ steps.grade.outputs.grade }}/5"
+          echo "Passed: ${{ steps.grade.outputs.passed }}/${{ steps.grade.outputs.total }}"
