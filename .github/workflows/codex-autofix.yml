@@ -1,0 +1,84 @@
+name: Codex Auto-Fix
+
+on:
+  workflow_run:
+    workflows: ["Python CI"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-fix:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      FAILED_WORKFLOW_NAME: ${{ github.event.workflow_run.name || 'manual-dispatch' }}
+      FAILED_RUN_URL: ${{ github.event.workflow_run.html_url || format('{0}/{1}/actions', github.server_url, github.repository) }}
+      FAILED_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+      FAILED_HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+    steps:
+      - name: Check OpenAI API key
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "OPENAI_API_KEY secret is not set." >&2
+            exit 1
+          fi
+
+      - name: Checkout failing ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FAILED_HEAD_SHA }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          if [ -f pyproject.toml ]; then pip install -e .; fi
+
+      - name: Run Codex
+        uses: openai/codex-action@main
+        with:
+          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          prompt: |
+            You are fixing a failing Python test workflow in this repository.
+            Work from the checked out branch and make the smallest possible code change.
+            Run `pytest -q test_defs_utils.py`.
+            If the test fails, fix the cause of the failure, then rerun `pytest -q test_defs_utils.py`.
+            Stop only when `pytest -q test_defs_utils.py` passes.
+            Do not refactor unrelated files. Keep changes small and surgical.
+          codex_args: '["--config","sandbox_mode=\"workspace-write\""]'
+
+      - name: Verify tests
+        run: |
+          pytest -q test_defs_utils.py
+
+      - name: Create pull request with fixes
+        if: success()
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "fix(ci): auto-fix failing test_defs_utils via Codex"
+          branch: codex/auto-fix-${{ github.run_id }}
+          base: ${{ env.FAILED_HEAD_BRANCH }}
+          title: "Auto-fix failing tests via Codex"
+          body: |
+            Codex generated this PR in response to a failed workflow or a manual run.
+            Source workflow: `${{ env.FAILED_WORKFLOW_NAME }}`
+            Source run: ${{ env.FAILED_RUN_URL }}
+            Target branch: `${{ env.FAILED_HEAD_BRANCH }}`
+            Verification command: `pytest -q test_defs_utils.py`
